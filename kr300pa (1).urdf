@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  URDF corregido — KUKA KR 300-2 PA
+  Cadena cinematica verificada contra datasheet Spez KR 300 470-2 PA V10
+  
+  Convencion de ejes (vista lateral, robot en posicion cero):
+    base_link  : origen en el suelo
+    joint_a1   : giro en Z (columna azimutal), sube d1=0.846 m
+    joint_a2   : giro en Y (cabeceo), avanza a2=0.560 m en X
+    joint_a3   : giro en Y (elevacion), avanza a3=1.314 m en X
+    joint_a4   : giro en Y (muñeca pitch), avanza a4=1.080 m en X
+    joint_a6   : giro en X (muñeca roll), baja d5=0.321 m en -Z
+    joint_tcp  : fija, coincide con flange A6
+
+  Posicion cero esperada del TCP:
+    X = a2 + a3 + a4 = 0.560 + 1.314 + 1.080 = 2.954 m  → pero Z debe ser d1 = 0.846
+    
+  Posicion transporte [0,-130,155,0,0] deg → TCP en Z ~ 2.332 m (datasheet Fig 6-2)
+-->
+<robot name="kuka_kr300_2_pa">
+
+  <material name="kuka_orange">
+    <color rgba="0.851 0.329 0.098 1.0"/>
+  </material>
+  <material name="kuka_black">
+    <color rgba="0.082 0.082 0.082 1.0"/>
+  </material>
+  <material name="kuka_gray">
+    <color rgba="0.502 0.502 0.502 1.0"/>
+  </material>
+
+  <!-- BASE: placa en el suelo -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 -0.025" rpy="0 0 0"/>
+      <geometry><box size="0.60 0.60 0.05"/></geometry>
+      <material name="kuka_black"/>
+    </visual>
+  </link>
+
+  <!-- LINK 1: columna giratoria (gira con A1) -->
+  <link name="link_1">
+    <inertial>
+      <mass value="600.0"/>
+      <origin xyz="0 0 0.423" rpy="0 0 0"/>
+      <inertia ixx="45.15" ixy="0" ixz="0"
+               iyy="45.15" iyz="0" izz="12.00"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.423" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.18" length="0.846"/></geometry>
+      <material name="kuka_black"/>
+    </visual>
+  </link>
+
+  <!-- LINK 2: eslabon inclinado a2=0.560 m (gira con A2) -->
+  <link name="link_2">
+    <inertial>
+      <mass value="250.0"/>
+      <origin xyz="0.280 0 0" rpy="0 0 0"/>
+      <inertia ixx="6.55" ixy="0" ixz="0"
+               iyy="6.55" iyz="0" izz="1.80"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.280 0 0" rpy="0 1.5708 0"/>
+      <geometry><cylinder radius="0.10" length="0.560"/></geometry>
+      <material name="kuka_orange"/>
+    </visual>
+  </link>
+
+  <!-- LINK 3: brazo principal a3=1.314 m (gira con A3) -->
+  <link name="link_3">
+    <inertial>
+      <mass value="500.0"/>
+      <origin xyz="0.657 0 0" rpy="0 0 0"/>
+      <inertia ixx="73.55" ixy="0" ixz="0"
+               iyy="73.55" iyz="0" izz="2.50"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.657 0 0" rpy="0 1.5708 0"/>
+      <geometry><cylinder radius="0.09" length="1.314"/></geometry>
+      <material name="kuka_orange"/>
+    </visual>
+  </link>
+
+  <!-- LINK 4: antebrazo a4=1.080 m (gira con A4/A5) -->
+  <link name="link_4">
+    <inertial>
+      <mass value="400.0"/>
+      <origin xyz="0.540 0 0" rpy="0 0 0"/>
+      <inertia ixx="39.44" ixy="0" ixz="0"
+               iyy="39.44" iyz="0" izz="1.28"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.540 0 0" rpy="0 1.5708 0"/>
+      <geometry><cylinder radius="0.08" length="1.080"/></geometry>
+      <material name="kuka_orange"/>
+    </visual>
+  </link>
+
+  <!-- LINK 5: muneca d5=0.321 m hacia abajo (-Z) -->
+  <link name="link_5">
+    <inertial>
+      <mass value="100.0"/>
+      <origin xyz="0 0 -0.160" rpy="0 0 0"/>
+      <inertia ixx="3.00" ixy="0" ixz="0"
+               iyy="3.00" iyz="0" izz="0.18"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 -0.160" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.09" length="0.321"/></geometry>
+      <material name="kuka_gray"/>
+    </visual>
+  </link>
+
+  <!-- TCP / FLANGE A6 -->
+  <link name="tool0"/>
+
+  <!-- ═══════════════════════════════════════════
+       JUNTAS — geometria verificada
+  ═══════════════════════════════════════════ -->
+
+  <!--
+    A1: columna gira en Z (azimutal)
+    La junta esta en el suelo, el cuerpo 1 sube d1=0.846 m
+    En posicion cero la columna queda vertical: correcto
+  -->
+  <joint name="joint_a1" type="revolute">
+    <parent link="base_link"/>
+    <child  link="link_1"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.2289" upper="3.2289"
+           velocity="1.7017" effort="9000"/>
+    <dynamics damping="50.0" friction="10.0"/>
+  </joint>
+
+  <!--
+    A2: cabeceo — junta en la cima de la columna (Z=d1=0.846)
+    Eje de giro en Y (pitch)
+    En posicion cero (q2=0) el eslabón sale horizontal en +X
+    Con offset de -90 deg mecanico: q2=0 mecanico → -90 deg DH
+    Para no complicar el URDF, dejamos q2=0 = horizontal
+    y el usuario aplica el offset en MATLAB si lo necesita
+  -->
+  <joint name="joint_a2" type="revolute">
+    <parent link="link_1"/>
+    <child  link="link_2"/>
+    <origin xyz="0 0 0.846222" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.2689" upper="0.3491"
+           velocity="1.5882" effort="12000"/>
+    <dynamics damping="80.0" friction="15.0"/>
+  </joint>
+
+  <!--
+    A3: elevacion del brazo — junta al final del eslabon 2 (X=a2=0.560)
+    Eje de giro en Y (pitch)
+  -->
+  <joint name="joint_a3" type="revolute">
+    <parent link="link_2"/>
+    <child  link="link_3"/>
+    <origin xyz="0.560 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="2.7053"
+           velocity="1.5533" effort="8000"/>
+    <dynamics damping="60.0" friction="12.0"/>
+  </joint>
+
+  <!--
+    A4/A5: muñeca — junta al final del brazo principal (X=a3=1.314)
+    Eje de giro en Y (el paralelogramo mantiene orientacion)
+  -->
+  <joint name="joint_a4" type="revolute">
+    <parent link="link_3"/>
+    <child  link="link_4"/>
+    <origin xyz="1.314102 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-6.1087" upper="6.1087"
+           velocity="3.0892" effort="3000"/>
+    <dynamics damping="20.0" friction="5.0"/>
+  </joint>
+
+  <!--
+    A6: giro del flange — junta al final del antebrazo (X=a4=1.080)
+    Eje de giro en X (roll del efector)
+    La muneca baja d5=0.321 m en -Z para que el TCP apunte hacia abajo
+  -->
+  <joint name="joint_a6" type="revolute">
+    <parent link="link_4"/>
+    <child  link="link_5"/>
+    <origin xyz="1.080334 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-6.1087" upper="6.1087"
+           velocity="3.0892" effort="2000"/>
+    <dynamics damping="10.0" friction="3.0"/>
+  </joint>
+
+  <!--
+    TCP fijo: baja d5=0.321 m en -Z desde la junta A6
+  -->
+  <joint name="joint_tcp" type="fixed">
+    <parent link="link_5"/>
+    <child  link="tool0"/>
+    <origin xyz="0 0 -0.320941" rpy="0 0 0"/>
+  </joint>
+
+</robot>
