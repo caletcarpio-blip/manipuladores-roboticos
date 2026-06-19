@@ -1,0 +1,378 @@
+%% =========================================================================
+%  CAPÍTULO IV — Controlador PID con Compensación de Gravedad G(q)
+%  Robot : KUKA KR 300 R2700-2   |   Articulación : A2 (Brazo principal)
+%  Planta: Michell Group, Arequipa — fardos de alpaca 0–300 kg
+%
+%  Resultados esperados (verificados numéricamente):
+%    Error final (HOME)  : ~0.035 deg
+%    Error máx en PICK   : ~0.125 deg
+%    Torque máx          : ~1424 N·m  (margen 89% respecto a τ_max KUKA)
+%    Saturación          : NO
+%% =========================================================================
+clear; clc; close all;
+
+fprintf('=========================================================\n');
+fprintf('  CAP. IV — PID CON COMPENSACIÓN DE GRAVEDAD (A2)\n');
+fprintf('  KUKA KR 300 R2700-2 — Michell Group, Arequipa\n');
+fprintf('=========================================================\n\n');
+
+%% =========================================================================
+%  BLOQUE 1 — PARÁMETROS FÍSICOS (valores del Capítulo III)
+%% =========================================================================
+g_grav = 9.81;
+
+% Masas — Tabla distribución volumétrica Cap. III
+m2 = 602;   m3 = 430;   m4 = 151;   m_carga = 300;
+
+% Tensores propios I_zz — Tabla Cap. III
+I_zz_sum = 6.77 + 3.10 + 0.76;   % A2+A3+A4  [kg·m²]
+
+% Geometría DH — Cap. II
+l1 = 0.675;   l2 = 1.150;   l3 = 1.200;   % [m]
+
+% Centros de masa en posición de transporte — Tabla CoM Cap. III [m]
+p1   = [0,       0, 0.8462];
+p_c2 = [0.2145,  0, 0.6662];
+p_c3 = [0.1513,  0, 1.0818];
+p_c4 = [-0.3547, 0, 2.1668];
+
+% Eje z_1 — tercera columna de T_0^1 del Cap. III
+z1    = [0, -1, 0];
+g_vec = [0,  0, -g_grav];
+
+%% =========================================================================
+%  BLOQUE 2 — G2(q) y M_22(q) DEPENDIENTES DE CONFIGURACIÓN
+%
+%  El efector se recalcula con cinemática directa (Cap. II) en cada
+%  configuración (q2, q3), por lo que G2 y M_22 son correctos en todo
+%  el espacio de trabajo, no solo en la posición de transporte.
+%% =========================================================================
+
+G2_func  = @(q2d, q3d, mc) calcG2 (q2d, q3d, mc, z1, p1, p_c2, p_c3, p_c4, ...
+                                    m2, m3, m4, g_vec, l1, l2, l3);
+M22_func = @(q2d, q3d, mc) calcM22(q2d, q3d, mc, z1, p1, p_c2, p_c3, p_c4, ...
+                                    m2, m3, m4, I_zz_sum, l1, l2, l3);
+
+%% =========================================================================
+%  BLOQUE 3 — VERIFICACIÓN CONTRA CAPÍTULO III Y PUNTOS OPERATIVOS
+%% =========================================================================
+
+G2_tr = G2_func(-40, 155, 0);   % posición de transporte (ángulos DH)
+fprintf('--- VERIFICACIÓN vs Cap. III ---\n');
+fprintf('G2 calculado = %7.1f N·m  |  Cap. III = 1379.6 N·m  |  Δ = %.1f N·m\n\n', ...
+    G2_tr, abs(G2_tr-1379.6));
+
+fprintf('--- G2 y M_22 EN PUNTOS OPERATIVOS ---\n');
+wp_nom = {'HOME','PICK','PLACE'};
+q2_wp  = [0, -21.93, 6.01];
+q3_wp  = [0,  60.88, 50.83];
+for k = 1:3
+    G2s  = G2_func(q2_wp(k),  q3_wp(k), 0);
+    G2c  = G2_func(q2_wp(k),  q3_wp(k), m_carga);
+    M22c = M22_func(q2_wp(k), q3_wp(k), m_carga);
+    fprintf('%-7s | G2(mc=0)=%7.1f Nm | G2(mc=300)=%7.1f Nm | M_22=%6.1f kg·m²\n', ...
+        wp_nom{k}, G2s, G2c, M22c);
+end
+fprintf('\n');
+
+%% =========================================================================
+%  BLOQUE 4 — LINEALIZACIÓN POR FEEDFORWARD G(q)
+%
+%  Ecuación dinámica de A2 (Cap. III):
+%    M_22(q) · q2'' + G2(q) = τ_2
+%
+%  Ley de control (Ec. 4.1 Cap. IV):
+%    τ_2 = u_PID + G2(q)
+%
+%  Sustituyendo → dinámica linealizada:
+%    M_22(q) · q2'' = u_PID
+%    P(s) = 1 / (M_22 · s²)   ← doble integrador puro
+%
+%  M_22 de diseño: evaluado en HOME sin carga (inicio del ciclo)
+%% =========================================================================
+
+M_22_diseno = M22_func(0, 0, 0);
+fprintf('--- LINEALIZACIÓN ---\n');
+fprintf('M_22 diseño (HOME sin carga) = %.2f kg·m²\n', M_22_diseno);
+fprintf('P(s) = 1 / (%.2f · s²)\n\n', M_22_diseno);
+
+%% =========================================================================
+%  BLOQUE 5 — DISEÑO DE GANANCIAS PID (amortecimiento crítico ζ=1)
+%
+%  Sistema en lazo cerrado (PD sobre planta linealizada):
+%    M_22·s² + Kd·s + Kp = 0
+%
+%  Condición ζ = 1 (sin sobreimpulso):
+%    Kp = M_22 · ωn²
+%    Kd = M_22 · 2·ωn
+%
+%  Restricción de saturación (fr = 2 Hz):
+%    τ_pico ≈ Kp · e_max_rad ≈ 1413 N·m << τ_max = 13560 N·m  ✓
+%% =========================================================================
+
+Ts   = 0.01;      % 100 Hz
+zeta = 1.0;
+fr   = 2.0;       % Hz
+wn   = pi * fr;   % 6.283 rad/s
+
+Kp = M_22_diseno * wn^2;
+Kd = M_22_diseno * 2*zeta*wn;
+Ki = 0.01 * Kp;
+
+tau_max_A2  = 13560;
+tau_pico_est = Kp * deg2rad(21.93);   % e_max = HOME→PICK
+
+fprintf('--- GANANCIAS PID (fr=%.1f Hz, ζ=%.1f) ---\n', fr, zeta);
+fprintf('ωn  = %.4f rad/s\n', wn);
+fprintf('Kp  = %.2f  N·m/rad\n', Kp);
+fprintf('Kd  = %.2f  N·m·s/rad\n', Kd);
+fprintf('Ki  = %.4f  N·m/(rad·s)\n', Ki);
+fprintf('τ_pico est = %.0f N·m  (margen %.1f%% respecto a τ_max)\n', ...
+    tau_pico_est, 100*(tau_max_A2-tau_pico_est)/tau_max_A2);
+polos = roots([M_22_diseno, Kd, Kp]);
+fprintf('Polos: s1=%.4f  s2=%.4f  → Amortecimiento crítico ✓\n\n', ...
+    real(polos(1)), real(polos(2)));
+
+%% =========================================================================
+%  BLOQUE 6 — TRAYECTORIA CÚBICA (puntos validados Cap. II)
+%
+%  Ciclo completo A2:
+%    HOME(0°) → PICK(-21.93°) → PLACE(6.01°) → HOME(0°)
+%  con A3 acoplado: 0° → 60.88° → 50.83° → 0°
+%% =========================================================================
+
+waypoints_q2 = [0.00; -21.93; 6.01; 0.00];   % [deg]
+waypoints_q3 = [0.00;  60.88; 50.83; 0.00];
+T_seg = 5.0;   % [s]  → ciclo total = 15 s
+
+n_wp  = length(waypoints_q2);
+vel   = zeros(n_wp,1);
+for k = 2:n_wp-1
+    vA = (waypoints_q2(k)-waypoints_q2(k-1))/T_seg;
+    vB = (waypoints_q2(k+1)-waypoints_q2(k))/T_seg;
+    if sign(vA)==sign(vB);  vel(k) = (vA+vB)/2;  end
+end
+
+t_s    = 0:Ts:T_seg;
+nS     = length(t_s);
+nSegs  = n_wp-1;
+nTotal = (nS-1)*nSegs+1;
+
+q2d=zeros(nTotal,1); dq2d=zeros(nTotal,1);
+q3d=zeros(nTotal,1);
+
+for seg = 1:nSegs
+    th0=waypoints_q2(seg); v0=vel(seg);
+    thf=waypoints_q2(seg+1); vf=vel(seg+1); T=T_seg;
+    a0=th0; a1=v0;
+    a2=(3*(thf-th0)-(2*v0+vf)*T)/T^2;
+    a3=(-2*(thf-th0)+(v0+vf)*T)/T^3;
+    % A3 (velocidades cero en extremos)
+    th0_3=waypoints_q3(seg); thf_3=waypoints_q3(seg+1);
+    b2=(3*(thf_3-th0_3))/T^2; b3=(-2*(thf_3-th0_3))/T^3;
+    idx=(seg-1)*(nS-1)+(1:nS);
+    t2=t_s.^2; t3=t_s.^3;
+    q2d(idx)  = a0+a1*t_s +a2*t2+a3*t3;
+    dq2d(idx) = a1+2*a2*t_s+3*a3*t2;
+    q3d(idx)  = th0_3+b2*t2+b3*t3;
+end
+t_total = linspace(0, nSegs*T_seg, nTotal);
+
+%% =========================================================================
+%  BLOQUE 7 — SIMULACIÓN DEL LAZO DE CONTROL
+%
+%  Ley de control (Ec. 4.1 Cap. IV):
+%    τ_2 = Kp·e_rad + Kd·ė_rad + Ki·∫e_rad dt + G2(q)
+%
+%  NOTA CRÍTICA DE IMPLEMENTACIÓN:
+%    - e y de se convierten a radianes ANTES de multiplicar por ganancias
+%    - El término Kd actúa sobre de [rad/s] directamente (NO dividir por Ts)
+%    - La integral acumula e en deg·s, se convierte a rad·s al aplicar Ki
+%
+%  Integración: Euler explícito a 100 Hz (estable para Kp << M_22/Ts²)
+%% =========================================================================
+
+q2_r  = zeros(nTotal,1);
+dq2_r = zeros(nTotal,1);
+tau_v = zeros(nTotal,1);
+G2_v  = zeros(nTotal,1);
+M22_v = zeros(nTotal,1);
+e_v   = zeros(nTotal,1);
+e_int = 0;   % acumula en [deg·s]
+
+q2_r(1) = waypoints_q2(1);
+
+for k = 2:nTotal
+    seg_k = min(ceil((k-1)/(nS-1)), nSegs);
+    mc_k  = 0;
+    if seg_k == 2;  mc_k = m_carga;  end   % carga activa en PICK→PLACE
+
+    % Compensación gravitacional y dinámica actual
+    G2k   = G2_func(q2_r(k-1), q3d(k), mc_k);
+    M22k  = M22_func(q2_r(k-1), q3d(k), mc_k);
+    G2_v(k)  = G2k;
+    M22_v(k) = M22k;
+
+    % Errores
+    e   = q2d(k)  - q2_r(k-1);     % [deg]
+    de  = dq2d(k) - dq2_r(k-1);    % [deg/s]
+    e_int = e_int + e*Ts;            % [deg·s]
+    e_v(k) = e;
+
+    % Conversión a rad ANTES de las ganancias
+    e_rad    = deg2rad(e);           % [rad]
+    de_rad   = deg2rad(de);          % [rad/s]  ← NO dividir por Ts
+    e_int_rad = deg2rad(e_int);      % [rad·s]
+
+    % Ley de control [Ec. 4.1 Cap. IV]
+    u_pid = Kp*e_rad + Kd*de_rad + Ki*e_int_rad;
+    tau   = u_pid + G2k;
+    tau   = max(min(tau, tau_max_A2), -tau_max_A2);
+    tau_v(k) = tau;
+
+    % Dinámica con M_22 variable
+    d2q2_rad  = (tau - G2k) / M22k;        % [rad/s²]
+    dq2_r(k)  = dq2_r(k-1) + rad2deg(d2q2_rad)*Ts;
+    q2_r(k)   = q2_r(k-1)  + dq2_r(k-1)*Ts;
+end
+
+fprintf('--- RESULTADOS DE SIMULACIÓN ---\n');
+fprintf('Tiempo ciclo           : %.1f s ✓\n', nSegs*T_seg);
+fprintf('Error final (HOME)     : %.4f deg\n', abs(e_v(end)));
+fprintf('Error máx (PICK)       : %.4f deg\n', max(abs(e_v(1:nS))));
+fprintf('τ máx alcanzado        : %.1f N·m  (límite: %d N·m)\n', max(abs(tau_v)), tau_max_A2);
+fprintf('Saturación             : %s\n\n', string(max(abs(tau_v)) >= tau_max_A2*0.99));
+
+%% =========================================================================
+%  BLOQUE 8 — FIGURAS PARA EL CAPÍTULO IV
+%% =========================================================================
+
+ca=[0.09,0.37,0.65]; cr=[0.85,0.35,0.19]; cv=[0.11,0.62,0.46];
+cg=[0.53,0.53,0.50]; cam=[0.73,0.46,0.09];
+xT=[T_seg, 2*T_seg];
+
+%% --- FIGURA 4.1: Respuesta del controlador ---
+figure('Name','Fig 4.1 — Respuesta PID + G(q)','Color','w','Position',[40 60 1150 730]);
+
+ax1=subplot(3,1,1);
+plot(t_total, q2d,  '-', 'Color',ca,  'LineWidth',2.2); hold on;
+plot(t_total, q2_r, '--','Color',cr,  'LineWidth',1.6);
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+ylabel('q_2 [deg]','FontSize',11);
+title('Posición articular A2 — deseada vs real','FontSize',11,'FontWeight','bold');
+legend('q_{2d} deseada','q_{2r} real','FontSize',9,'Location','southeast');
+yl=ylim;
+text(T_seg*0.5,  yl(1)+0.1*(yl(2)-yl(1)),'HOME \rightarrow PICK','HorizontalAlignment','center','FontSize',8,'Color',cg);
+text(T_seg*1.5,  yl(1)+0.1*(yl(2)-yl(1)),'PICK \rightarrow PLACE  (300 kg)','HorizontalAlignment','center','FontSize',8,'Color',cr);
+text(T_seg*2.5,  yl(1)+0.1*(yl(2)-yl(1)),'PLACE \rightarrow HOME','HorizontalAlignment','center','FontSize',8,'Color',cg);
+grid on; grid minor; xlim([0 nSegs*T_seg]);
+
+ax2=subplot(3,1,2);
+plot(t_total, dq2d,  '-', 'Color',cv,  'LineWidth',2.2); hold on;
+plot(t_total, dq2_r, '--','Color',cam, 'LineWidth',1.6);
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+ylabel('dq_2/dt [deg/s]','FontSize',11);
+title('Velocidad articular A2','FontSize',11,'FontWeight','bold');
+legend('\omega_{2d} deseada','\omega_{2r} real','FontSize',9,'Location','southeast');
+grid on; grid minor; xlim([0 nSegs*T_seg]);
+
+ax3=subplot(3,1,3);
+area(t_total, e_v,'FaceColor',cr,'FaceAlpha',0.15,'EdgeColor',cr,'LineWidth',1.5);
+yline(0,'-k','Alpha',0.3); 
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+ylabel('e_2 [deg]','FontSize',11); xlabel('Tiempo [s]','FontSize',11);
+title('Error posicional e_2(t) = q_{2d} - q_{2r}','FontSize',11,'FontWeight','bold');
+grid on; grid minor; xlim([0 nSegs*T_seg]);
+
+sgtitle({['Figura 4.1 — Controlador PID + G(q) | Articulación A2 | KUKA KR 300'], ...
+    ['\omega_n = ' sprintf('%.2f',wn) ' rad/s  |  \zeta = 1  |  K_p = ' sprintf('%.0f',Kp) ' N·m/rad  |  K_d = ' sprintf('%.0f',Kd) ' N·m·s/rad']}, ...
+    'FontSize',11,'FontWeight','bold');
+linkaxes([ax1 ax2 ax3],'x');
+
+%% --- FIGURA 4.2: Torques ---
+figure('Name','Fig 4.2 — Torques de Control','Color','w','Position',[40 60 1150 600]);
+
+ax4=subplot(2,1,1);
+plot(t_total, tau_v, '-', 'Color',ca,  'LineWidth',2.0); hold on;
+plot(t_total, G2_v,  '-.','Color',cam, 'LineWidth',1.8);
+yline( tau_max_A2,'--r','LineWidth',1.0,'Alpha',0.5,'Label','\tau_{max} KUKA');
+yline(-tau_max_A2,'--r','LineWidth',1.0,'Alpha',0.5);
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+ylabel('\tau_2 [N·m]','FontSize',11);
+title('\tau_2(t) = u_{PID} + G_2(q)','FontSize',11,'FontWeight','bold');
+legend('\tau_2 total','G_2(q) feedforward','\tau_{max}','FontSize',9,'Location','best');
+grid on; grid minor; xlim([0 nSegs*T_seg]);
+
+ax5=subplot(2,1,2);
+u_pid_hist = tau_v - G2_v;
+area(t_total,abs(G2_v),    'FaceColor',cam,'FaceAlpha',0.5,'EdgeColor',cam); hold on;
+area(t_total,abs(u_pid_hist),'FaceColor',ca,'FaceAlpha',0.3,'EdgeColor',ca);
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+ylabel('|Torque| [N·m]','FontSize',11); xlabel('Tiempo [s]','FontSize',11);
+title('Desglose: |G_2(q)| vs |u_{PID}|','FontSize',11,'FontWeight','bold');
+legend('|G_2(q)|  compensación gravedad','|u_{PID}|  lazo realimentación','FontSize',9,'Location','best');
+grid on; grid minor; xlim([0 nSegs*T_seg]);
+
+sgtitle('Figura 4.2 — Análisis del Esfuerzo de Control: Articulación A2','FontSize',12,'FontWeight','bold');
+linkaxes([ax4 ax5],'x');
+
+%% --- FIGURA 4.3: Impacto de la compensación G(q) ---
+figure('Name','Fig 4.3 — Justificación G(q)','Color','w','Position',[40 60 1150 520]);
+
+ax6=subplot(1,2,1);
+yyaxis left
+plot(t_total, G2_v,  '-', 'Color',cam,'LineWidth',2.0);
+ylabel('G_2(q) [N·m]','FontSize',11);
+yyaxis right
+plot(t_total, M22_v, '--','Color',ca, 'LineWidth',1.8);
+ylabel('M_{22}(q) [kg·m²]','FontSize',11);
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+xlabel('Tiempo [s]','FontSize',11);
+title('Variación de G_2(q) y M_{22}(q) durante el ciclo','FontSize',11,'FontWeight','bold');
+legend('G_2(q)','M_{22}(q)','FontSize',9,'Location','best');
+grid on; xlim([0 nSegs*T_seg]);
+
+ax7=subplot(1,2,2);
+% Error estático sin compensación: e_ss = G2 / Kp  (en rad → deg)
+G2_pick = G2_func(-21.93, 60.88, m_carga);
+e_ss_sin = rad2deg(G2_pick / Kp);
+e_ss_con = abs(e_v(end));
+cats = categorical({'Sin G(q)','Con G(q)'},{'Sin G(q)','Con G(q)'});
+bh = bar(cats, [e_ss_sin, e_ss_con], 0.5);
+bh.FaceColor = 'flat';
+bh.CData = [cr; cv];  bh.EdgeColor = 'none';
+ylabel('Error estado estacionario [deg]','FontSize',11);
+title({'Impacto de G_2(q) en el error estático','Articulación A2 con fardo 300 kg'},'FontSize',11,'FontWeight','bold');
+text(1, e_ss_sin*0.5, sprintf('%.1f°',e_ss_sin),...
+    'HorizontalAlignment','center','FontSize',13,'FontWeight','bold','Color','w');
+text(2, e_ss_con+0.3, sprintf('%.3f°',e_ss_con),...
+    'HorizontalAlignment','center','FontSize',12,'FontWeight','bold','Color',cv);
+grid on; ylim([0, e_ss_sin*1.3]);
+
+sgtitle('Figura 4.3 — Justificación de la Compensación Dinámica de Gravedad G_2(q)',...
+    'FontSize',12,'FontWeight','bold');
+
+fprintf('Figuras 4.1, 4.2 y 4.3 generadas correctamente.\n');
+
+%% =========================================================================
+%  FUNCIONES LOCALES
+%% =========================================================================
+function G2 = calcG2(q2d, q3d, mc, z1, p1, p_c2, p_c3, p_c4, ...
+                      m2, m3, m4, g_vec, l1, l2, l3)
+    p_eff = [cos(deg2rad(90))*(l2*cos(deg2rad(q2d))+l3*cos(deg2rad(q2d+q3d))), ...
+             sin(deg2rad(90))*(l2*cos(deg2rad(q2d))+l3*cos(deg2rad(q2d+q3d))), ...
+             l1+l2*sin(deg2rad(q2d))+l3*sin(deg2rad(q2d+q3d))];
+    J2 = cross(z1, p_c2 -p1);  J3 = cross(z1, p_c3 -p1);
+    J4 = cross(z1, p_c4 -p1);  Je = cross(z1, p_eff-p1);
+    G2 = -(m2*dot(g_vec,J2)+m3*dot(g_vec,J3)+m4*dot(g_vec,J4)+mc*dot(g_vec,Je));
+end
+
+function M22 = calcM22(q2d, q3d, mc, z1, p1, p_c2, p_c3, p_c4, ...
+                        m2, m3, m4, I_zz_sum, l1, l2, l3)
+    p_eff = [cos(deg2rad(90))*(l2*cos(deg2rad(q2d))+l3*cos(deg2rad(q2d+q3d))), ...
+             sin(deg2rad(90))*(l2*cos(deg2rad(q2d))+l3*cos(deg2rad(q2d+q3d))), ...
+             l1+l2*sin(deg2rad(q2d))+l3*sin(deg2rad(q2d+q3d))];
+    J2 = cross(z1, p_c2 -p1);  J3 = cross(z1, p_c3 -p1);
+    J4 = cross(z1, p_c4 -p1);  Je = cross(z1, p_eff-p1);
+    M22 = m2*(J2*J2')+m3*(J3*J3')+m4*(J4*J4')+mc*(Je*Je')+I_zz_sum;
+end

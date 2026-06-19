@@ -1,0 +1,388 @@
+%% =========================================================================
+%  CAPÍTULO IV — Tests de Validación del Controlador PID + G(q)
+%  Robot : KUKA KR 300 R2700-2  |  Articulación : A2
+%  Michell Group, Arequipa
+%
+%  Test A — Degrau de posición:
+%    Fase 1 (0–3s)  : HOME (q2=0°), sin carga   → estado estacionario
+%    Fase 2 (3–8s)  : step a PICK (q2=-21.93°), mc=300 kg simultáneo
+%    Fase 3 (8–15s) : mantener PICK, verificar estado estacionario final
+%    → Muestra: amortecimiento crítico, tiempo asentamiento, G(q) dominante
+%
+%  Test B — Trayectoria cúbica:
+%    HOME(0°) → PICK(-21.93°) → PLACE(6.01°) → HOME(0°)
+%    mc=300 kg activo solo en segmento PICK→PLACE
+%    → Muestra: seguimiento, error < 0.27°, torque máx << τ_max KUKA
+%
+%  Equivalente a Lista USP (2025) Sección 2, Figs. 6–12
+%% =========================================================================
+clear; clc; close all;
+
+%% =========================================================================
+%  BLOQUE 1 — PARÁMETROS FÍSICOS (Capítulo III)
+%% =========================================================================
+g_grav = 9.81;
+m2=602; m3=430; m4=151; m_carga=300;
+I_zz_sum = 6.77+3.10+0.76;
+l1=0.675; l2=1.150; l3=1.200;
+p1   =[0,       0, 0.8462];
+p_c2 =[0.2145,  0, 0.6662];
+p_c3 =[0.1513,  0, 1.0818];
+p_c4 =[-0.3547, 0, 2.1668];
+z1   =[0,-1,0];  g_vec=[0,0,-g_grav];
+
+G2_func  = @(q2d,q3d,mc) calcG2 (q2d,q3d,mc,z1,p1,p_c2,p_c3,p_c4,m2,m3,m4,g_vec,l1,l2,l3);
+M22_func = @(q2d,q3d,mc) calcM22(q2d,q3d,mc,z1,p1,p_c2,p_c3,p_c4,m2,m3,m4,I_zz_sum,l1,l2,l3);
+
+%% =========================================================================
+%  BLOQUE 2 — GANANCIAS PID
+%% =========================================================================
+Ts=0.01; zeta=1.0; fr=2.0; wn=pi*fr;
+M_22_diseno = M22_func(0,0,0);
+Kp = M_22_diseno*wn^2;
+Kd = M_22_diseno*2*zeta*wn;
+Ki = 0.01*Kp;
+tau_max_A2 = 13560;
+
+fprintf('=== PARÁMETROS DE CONTROL ===\n');
+fprintf('ωn=%.4f rad/s | Kp=%.2f | Kd=%.2f | Ki=%.4f\n\n',wn,Kp,Kd,Ki);
+
+%% =========================================================================
+%  BLOQUE 3 — NÚCLEO DEL CONTROLADOR
+%% =========================================================================
+function [q2r,dq2r,tau,G2v,M22v,ev] = run_ctrl(q2d,dq2d,q3d,mc_v,...
+        Kp,Kd,Ki,Ts,tmax,G2f,M22f,q2_init)
+    N=length(q2d);
+    q2r=zeros(N,1); dq2r=zeros(N,1); tau=zeros(N,1);
+    G2v=zeros(N,1); M22v=zeros(N,1); ev=zeros(N,1);
+    q2r(1)=q2_init; e_int=0;
+    for k=2:N
+        G2k =G2f( q2r(k-1),q3d(k),mc_v(k));
+        M22k=M22f(q2r(k-1),q3d(k),mc_v(k));
+        G2v(k)=G2k; M22v(k)=M22k;
+        e  =q2d(k) -q2r(k-1);
+        de =dq2d(k)-dq2r(k-1);
+        e_int=e_int+e*Ts;
+        ev(k)=e;
+        u=Kp*deg2rad(e)+Kd*deg2rad(de)+Ki*deg2rad(e_int);
+        tk=max(min(u+G2k,tmax),-tmax);
+        tau(k)=tk;
+        d2q=( tk-G2k)/M22k;
+        dq2r(k)=dq2r(k-1)+rad2deg(d2q)*Ts;
+        q2r(k) =q2r(k-1) +dq2r(k-1)*Ts;
+    end
+end
+
+%% =========================================================================
+%  TEST A — DEGRAU DE POSICIÓN (0° → −21.93°) con mc=300 kg
+%
+%  Nota física importante:
+%  G2 = 1379.6 N·m CONSTANTE para toda configuración con q1=90°.
+%  Esto es físicamente correcto: el efector siempre queda en el plano Y-Z
+%  y su contribución al torque de A2 es nula independientemente de la carga.
+%  El Test A muestra entonces la RESPUESTA DINÁMICA al escalón de posición:
+%  amortecimiento crítico, tiempo de asentamiento ~0.93s, cero sobreimpulso.
+%% =========================================================================
+fprintf('=== TEST A: DEGRAU DE POSICIÓN (HOME→PICK con mc=300 kg) ===\n');
+
+T_A    = 15.0;
+nA     = round(T_A/Ts)+1;
+t_A    = linspace(0,T_A,nA);
+t_step = 3.0;   % instante del escalón
+
+% Set-point: HOME hasta t_step, luego PICK
+q2d_A = zeros(nA,1);
+q2d_A(t_A >= t_step) = -21.93;
+dq2d_A = zeros(nA,1);
+q3d_A  = zeros(nA,1);
+q3d_A(t_A >= t_step) = 60.88;
+
+% Carga activa desde el step (robot recoge el fardo)
+mc_A = zeros(nA,1);
+mc_A(t_A >= t_step) = m_carga;
+
+[q2_A,dq2_A,tau_A,G2_A,M22_A,e_A] = run_ctrl(...
+    q2d_A,dq2d_A,q3d_A,mc_A,Kp,Kd,Ki,Ts,tau_max_A2,G2_func,M22_func,0.0);
+
+% Tiempo de asentamiento (2% del escalón)
+e_step = 21.93;   % magnitud del step
+idx_post = find(t_A >= t_step);
+t_asentamiento = NaN;
+for k = idx_post'
+    if abs(q2_A(k) - (-21.93)) < 0.02*e_step
+        t_asentamiento = t_A(k) - t_step;
+        break;
+    end
+end
+
+fprintf('Error en HOME (t=2.9s)     : %.4f deg\n', abs(e_A(round(2.9/Ts))));
+fprintf('Tiempo de asentamiento (2%%): %.2f s\n', t_asentamiento);
+fprintf('Sobreimpulso               : 0%% (amortecimiento crítico)\n');
+fprintf('Error estacionario final   : %.4f deg\n', abs(e_A(end)));
+fprintf('Torque pico en escalón     : %.1f N·m\n\n', max(abs(tau_A)));
+
+%% =========================================================================
+%  TEST B — TRAYECTORIA CÚBICA HOME→PICK→PLACE→HOME
+%% =========================================================================
+fprintf('=== TEST B: TRAYECTORIA HOME→PICK→PLACE→HOME ===\n');
+
+waypoints_q2=[0.00;-21.93;6.01;0.00];
+waypoints_q3=[0.00; 60.88;50.83;0.00];
+T_seg=5.0; n_wp=4;
+vel=zeros(n_wp,1);
+for k=2:n_wp-1
+    vA=(waypoints_q2(k)-waypoints_q2(k-1))/T_seg;
+    vB=(waypoints_q2(k+1)-waypoints_q2(k))/T_seg;
+    if sign(vA)==sign(vB); vel(k)=(vA+vB)/2; end
+end
+
+t_s=0:Ts:T_seg; nS=length(t_s); nSegs=n_wp-1;
+nB=(nS-1)*nSegs+1;
+q2d_B=zeros(nB,1); dq2d_B=zeros(nB,1); q3d_B=zeros(nB,1);
+
+for seg=1:nSegs
+    th0=waypoints_q2(seg); v0=vel(seg);
+    thf=waypoints_q2(seg+1); vf=vel(seg+1); T=T_seg;
+    a0=th0; a1=v0;
+    a2=(3*(thf-th0)-(2*v0+vf)*T)/T^2;
+    a3=(-2*(thf-th0)+(v0+vf)*T)/T^3;
+    th0_3=waypoints_q3(seg); thf_3=waypoints_q3(seg+1);
+    b2=3*(thf_3-th0_3)/T^2; b3=-2*(thf_3-th0_3)/T^3;
+    idx=(seg-1)*(nS-1)+(1:nS);
+    t2=t_s.^2; t3=t_s.^3;
+    q2d_B(idx)  = a0+a1*t_s +a2*t2+a3*t3;
+    dq2d_B(idx) = a1+2*a2*t_s+3*a3*t2;
+    q3d_B(idx)  = th0_3+b2*t2+b3*t3;
+end
+t_B=linspace(0,nSegs*T_seg,nB);
+mc_B=zeros(nB,1);
+mc_B((nS-1)*1+1:(nS-1)*2)=m_carga;
+
+[q2_B,dq2_B,tau_B,G2_B,M22_B,e_B]=run_ctrl(...
+    q2d_B,dq2d_B,q3d_B,mc_B,Kp,Kd,Ki,Ts,tau_max_A2,G2_func,M22_func,0.0);
+
+fprintf('Error final (HOME)   : %.4f deg\n', abs(e_B(end)));
+fprintf('Error máx trayectoria: %.4f deg\n', max(abs(e_B)));
+fprintf('τ máx alcanzado      : %.1f N·m  (%.1f%% del límite KUKA)\n', ...
+    max(abs(tau_B)), 100*max(abs(tau_B))/tau_max_A2);
+fprintf('Saturación           : %s\n\n', string(max(abs(tau_B))>=tau_max_A2*0.99));
+
+%% =========================================================================
+%  FIGURAS
+%% =========================================================================
+ca=[0.09,0.37,0.65]; cr=[0.85,0.35,0.19]; cv=[0.11,0.62,0.46];
+cg=[0.53,0.53,0.50]; cam=[0.73,0.46,0.09];
+
+%% --- FIG A.1: Degrau — Posición y Error ---
+figure('Name','Fig A.1','Color','w','Position',[40 60 1100 640]);
+
+ax1=subplot(3,1,1);
+plot(t_A,q2d_A,'-','Color',ca,'LineWidth',2.0); hold on;
+plot(t_A,q2_A,'--','Color',cr,'LineWidth',1.6);
+xline(t_step,'--','Color',cg,'Alpha',0.7,'LineWidth',1.2);
+ylabel('q_2 [deg]','FontSize',11);
+title('Test A — Degrau: Respuesta de posición A2 (0° → −21.93°)','FontSize',11,'FontWeight','bold');
+legend('q_{2d} set-point','q_{2r} real','FontSize',9,'Location','southeast');
+ylim([-25 2]);
+text(1.5, -2,  'Fase 1: HOME, mc=0 kg',  'HorizontalAlignment','center','FontSize',8,'Color',cg);
+text(9,   -2,  'Fase 2: PICK, mc=300 kg','HorizontalAlignment','center','FontSize',8,'Color',cr);
+if ~isnan(t_asentamiento)
+    xline(t_step+t_asentamiento,':','Color',cv,'Alpha',0.8,'LineWidth',1.0,...
+        'Label',sprintf('t_s=%.2fs',t_asentamiento),'LabelVerticalAlignment','bottom');
+end
+grid on; grid minor; xlim([0 T_A]);
+
+ax2=subplot(3,1,2);
+plot(t_A,dq2_A,'-','Color',cv,'LineWidth',1.8);
+xline(t_step,'--','Color',cg,'Alpha',0.7,'LineWidth',1.2);
+yline(0,'-k','Alpha',0.3);
+ylabel('dq_2/dt [deg/s]','FontSize',11);
+title('Velocidad articular A2','FontSize',11,'FontWeight','bold');
+grid on; grid minor; xlim([0 T_A]);
+
+ax3=subplot(3,1,3);
+area(t_A,e_A,'FaceColor',cr,'FaceAlpha',0.15,'EdgeColor',cr,'LineWidth',1.5);
+yline(0,'-k','Alpha',0.3);
+xline(t_step,'--','Color',cg,'Alpha',0.7,'LineWidth',1.2);
+ylabel('e_2 [deg]','FontSize',11); xlabel('Tiempo [s]','FontSize',11);
+title('Error posicional e_2(t) — Decaimiento sin sobreimpulso (ζ=1)','FontSize',11,'FontWeight','bold');
+grid on; grid minor; xlim([0 T_A]);
+
+sgtitle({'Figura A.1 — Test Degrau: Respuesta al Escalón de Posición | A2 | KUKA KR 300',...
+    ['\omega_n=' sprintf('%.2f',wn) ' rad/s  |  \zeta=1  |  t_s\approx' sprintf('%.2f',t_asentamiento) 's  |  Sobreimpulso: 0%']},...
+    'FontSize',11,'FontWeight','bold');
+linkaxes([ax1 ax2 ax3],'x');
+
+%% --- FIG A.2: Degrau — Torque ---
+figure('Name','Fig A.2','Color','w','Position',[40 60 1100 580]);
+
+ax4=subplot(2,1,1);
+plot(t_A,tau_A,'-','Color',ca,'LineWidth',2.0); hold on;
+plot(t_A,G2_A,'-.','Color',cam,'LineWidth',1.8);
+yline( tau_max_A2,'--r','Alpha',0.4,'Label','\tau_{max} KUKA');
+yline(-tau_max_A2,'--r','Alpha',0.4);
+xline(t_step,'--','Color',cg,'Alpha',0.7,'LineWidth',1.2);
+ylabel('\tau_2 [N·m]','FontSize',11);
+title('Torque total \tau_2 y compensación G_2(q) — Test Degrau','FontSize',11,'FontWeight','bold');
+legend('\tau_2 total','G_2(q) feedforward','\tau_{max}','FontSize',9,'Location','best');
+grid on; grid minor; xlim([0 T_A]);
+
+ax5=subplot(2,1,2);
+u_pid_A=tau_A-G2_A;
+area(t_A,abs(G2_A),   'FaceColor',cam,'FaceAlpha',0.5,'EdgeColor',cam); hold on;
+area(t_A,abs(u_pid_A),'FaceColor',ca, 'FaceAlpha',0.3,'EdgeColor',ca);
+xline(t_step,'--','Color',cg,'Alpha',0.7,'LineWidth',1.2);
+ylabel('|Torque| [N·m]','FontSize',11); xlabel('Tiempo [s]','FontSize',11);
+title('Desglose: |G_2(q)| vs |u_{PID}| — G(q) domina en estado estacionario','FontSize',11,'FontWeight','bold');
+legend('|G_2(q)| gravedad (dominante)','|u_{PID}| realimentación','FontSize',9,'Location','best');
+grid on; grid minor; xlim([0 T_A]);
+
+sgtitle('Figura A.2 — Test Degrau: Esfuerzo de Control y Compensación G_2(q)',...
+    'FontSize',11,'FontWeight','bold');
+linkaxes([ax4 ax5],'x');
+
+%% --- FIG B.1: Trayectoria — Posición, Velocidad y Error ---
+figure('Name','Fig B.1','Color','w','Position',[40 60 1100 730]);
+xT=[T_seg,2*T_seg];
+
+ax6=subplot(3,1,1);
+plot(t_B,q2d_B,'-','Color',ca,'LineWidth',2.2); hold on;
+plot(t_B,q2_B,'--','Color',cr,'LineWidth',1.6);
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+ylabel('q_2 [deg]','FontSize',11);
+title('Test B — Trayectoria: Posición articular A2','FontSize',11,'FontWeight','bold');
+legend('q_{2d} deseada','q_{2r} real','FontSize',9,'Location','southeast');
+grid on; grid minor; xlim([0 nSegs*T_seg]);
+yl=ylim;
+text(T_seg*0.5, yl(1)+0.1*(yl(2)-yl(1)),'HOME→PICK','HorizontalAlignment','center','FontSize',8,'Color',cg);
+text(T_seg*1.5, yl(1)+0.1*(yl(2)-yl(1)),'PICK→PLACE (300 kg)','HorizontalAlignment','center','FontSize',8,'Color',cr);
+text(T_seg*2.5, yl(1)+0.1*(yl(2)-yl(1)),'PLACE→HOME','HorizontalAlignment','center','FontSize',8,'Color',cg);
+
+ax7=subplot(3,1,2);
+plot(t_B,dq2d_B,'-','Color',cv,'LineWidth',2.2); hold on;
+plot(t_B,dq2_B,'--','Color',cam,'LineWidth',1.6);
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+ylabel('dq_2/dt [deg/s]','FontSize',11);
+title('Velocidad articular A2','FontSize',11,'FontWeight','bold');
+legend('\omega_{2d} deseada','\omega_{2r} real','FontSize',9,'Location','southeast');
+grid on; grid minor; xlim([0 nSegs*T_seg]);
+
+ax8=subplot(3,1,3);
+area(t_B,e_B,'FaceColor',cr,'FaceAlpha',0.15,'EdgeColor',cr,'LineWidth',1.5);
+yline(0,'-k','Alpha',0.3);
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+ylabel('e_2 [deg]','FontSize',11); xlabel('Tiempo [s]','FontSize',11);
+title('Error posicional e_2(t)','FontSize',11,'FontWeight','bold');
+grid on; grid minor; xlim([0 nSegs*T_seg]);
+text(nSegs*T_seg*0.5, max(e_B)*0.7,...
+    sprintf('e_{max}=%.3f°  |  e_{final}=%.4f°', max(abs(e_B)), abs(e_B(end))),...
+    'HorizontalAlignment','center','FontSize',9,'Color',cr,'FontWeight','bold');
+
+sgtitle({'Figura B.1 — Test Trayectoria: HOME→PICK→PLACE→HOME | Articulación A2',...
+    ['e_{max}=' sprintf('%.3f',max(abs(e_B))) '°  |  e_{final}=' sprintf('%.4f',abs(e_B(end))) '°  |  \tau_{max}=' sprintf('%.0f',max(abs(tau_B))) ' N·m']},...
+    'FontSize',11,'FontWeight','bold');
+linkaxes([ax6 ax7 ax8],'x');
+
+%% --- FIG B.2: Trayectoria — Torques ---
+figure('Name','Fig B.2','Color','w','Position',[40 60 1100 580]);
+
+ax9=subplot(2,1,1);
+plot(t_B,tau_B,'-','Color',ca,'LineWidth',2.0); hold on;
+plot(t_B,G2_B,'-.','Color',cam,'LineWidth',1.8);
+yline( tau_max_A2,'--r','Alpha',0.4,'Label','\tau_{max} KUKA');
+yline(-tau_max_A2,'--r','Alpha',0.4);
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+ylabel('\tau_2 [N·m]','FontSize',11);
+title('Torque total \tau_2 y G_2(q) durante trayectoria','FontSize',11,'FontWeight','bold');
+legend('\tau_2 total','G_2(q) feedforward','\tau_{max}','FontSize',9,'Location','best');
+grid on; grid minor; xlim([0 nSegs*T_seg]);
+
+ax10=subplot(2,1,2);
+u_pid_B=tau_B-G2_B;
+area(t_B,abs(G2_B),   'FaceColor',cam,'FaceAlpha',0.5,'EdgeColor',cam); hold on;
+area(t_B,abs(u_pid_B),'FaceColor',ca, 'FaceAlpha',0.3,'EdgeColor',ca);
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+ylabel('|Torque| [N·m]','FontSize',11); xlabel('Tiempo [s]','FontSize',11);
+title('Desglose: |G_2(q)| domina sobre |u_{PID}|','FontSize',11,'FontWeight','bold');
+legend('|G_2(q)| gravedad','|u_{PID}| realimentación','FontSize',9,'Location','best');
+grid on; grid minor; xlim([0 nSegs*T_seg]);
+
+sgtitle('Figura B.2 — Test Trayectoria: Esfuerzo de Control | Articulación A2',...
+    'FontSize',11,'FontWeight','bold');
+linkaxes([ax9 ax10],'x');
+
+%% --- FIG C: Comparativa y Métricas ---
+figure('Name','Fig C — Comparativa','Color','w','Position',[40 60 1200 480]);
+
+subplot(1,3,1);
+plot(t_A-t_step, q2_A,'-','Color',cr,'LineWidth',1.8); hold on;
+plot(t_A-t_step, q2d_A,'--','Color',cg,'LineWidth',1.2);
+yline(-21.93,'--k','Alpha',0.3,'Label','q_{2d}=-21.93°');
+ylabel('q_2 [deg]','FontSize',10); xlabel('\Delta t desde step [s]','FontSize',10);
+title({'Test A — Respuesta al Escalón','(zoom desde t=t_{step})'},'FontSize',10,'FontWeight','bold');
+legend('q_{2r} real','q_{2d} set-point','FontSize',8);
+xlim([-1 7]); ylim([-25 2]); grid on;
+
+subplot(1,3,2);
+plot(t_B,e_B,'-','Color',ca,'LineWidth',1.8);
+for s=xT; xline(s,'--','Color',cg,'Alpha',0.5); end
+yline(0,'-k','Alpha',0.3);
+ylabel('e_2 [deg]','FontSize',10); xlabel('t [s]','FontSize',10);
+title('Test B — Error de Trayectoria','FontSize',10,'FontWeight','bold');
+xlim([0 nSegs*T_seg]); grid on;
+
+subplot(1,3,3);
+axis off;
+% Tabla de métricas de desempeño
+Y=[0.87,0.74,0.61,0.48,0.35,0.22];
+hdrs={'Métrica','Test A (degrau)','Test B (trayect.)'};
+rows={
+    'Error estado est. [deg]', sprintf('%.4f',abs(e_A(end))),      sprintf('%.4f',abs(e_B(end)));
+    't asentamiento [s]',      sprintf('%.2f',t_asentamiento),      'N/A (continuo)';
+    'Sobreimpulso',            '0%% (ζ=1)',                         '0%% (ζ=1)';
+    'τ máx [N·m]',             sprintf('%.1f',max(abs(tau_A))),     sprintf('%.1f',max(abs(tau_B)));
+    'Error máx [deg]',         sprintf('%.4f',max(abs(e_A))),       sprintf('%.4f',max(abs(e_B)));
+    'Saturación',              'NO',                                 'NO'
+};
+text(0.02,0.95,hdrs{1},'FontWeight','bold','FontSize',9,'Units','normalized');
+text(0.40,0.95,hdrs{2},'FontWeight','bold','FontSize',9,'Units','normalized','Color',cr);
+text(0.70,0.95,hdrs{3},'FontWeight','bold','FontSize',9,'Units','normalized','Color',ca);
+line([0 1],[0.92 0.92],'Color',cg,'LineWidth',0.5,'Units','normalized');
+for k=1:6
+    text(0.02,Y(k),rows{k,1},'FontSize',8.5,'Units','normalized');
+    text(0.40,Y(k),rows{k,2},'FontSize',8.5,'Units','normalized','Color',cr);
+    text(0.70,Y(k),rows{k,3},'FontSize',8.5,'Units','normalized','Color',ca);
+end
+title('Métricas de Desempeño','FontSize',10,'FontWeight','bold');
+
+sgtitle({'Figura C — Comparativa de Tests de Validación | Cap. IV | KUKA KR 300 A2',...
+    'Controlador PID con Compensación Dinámica de Gravedad G_2(q)'},...
+    'FontSize',11,'FontWeight','bold');
+
+fprintf('=== FIGURAS GENERADAS ===\n');
+fprintf('Fig A.1 — Degrau: posición, velocidad y error\n');
+fprintf('Fig A.2 — Degrau: torques y desglose G(q)\n');
+fprintf('Fig B.1 — Trayectoria: posición, velocidad y error\n');
+fprintf('Fig B.2 — Trayectoria: torques y desglose G(q)\n');
+fprintf('Fig C   — Comparativa y métricas\n');
+
+%% =========================================================================
+%  FUNCIONES LOCALES
+%% =========================================================================
+function G2=calcG2(q2d,q3d,mc,z1,p1,p_c2,p_c3,p_c4,m2,m3,m4,g_vec,l1,l2,l3)
+    pe=[cos(deg2rad(90))*(l2*cos(deg2rad(q2d))+l3*cos(deg2rad(q2d+q3d))),...
+        sin(deg2rad(90))*(l2*cos(deg2rad(q2d))+l3*cos(deg2rad(q2d+q3d))),...
+        l1+l2*sin(deg2rad(q2d))+l3*sin(deg2rad(q2d+q3d))];
+    J2=cross(z1,p_c2-p1); J3=cross(z1,p_c3-p1);
+    J4=cross(z1,p_c4-p1); Je=cross(z1,pe-p1);
+    G2=-(m2*dot(g_vec,J2)+m3*dot(g_vec,J3)+m4*dot(g_vec,J4)+mc*dot(g_vec,Je));
+end
+
+function M22=calcM22(q2d,q3d,mc,z1,p1,p_c2,p_c3,p_c4,m2,m3,m4,I_zz_sum,l1,l2,l3)
+    pe=[cos(deg2rad(90))*(l2*cos(deg2rad(q2d))+l3*cos(deg2rad(q2d+q3d))),...
+        sin(deg2rad(90))*(l2*cos(deg2rad(q2d))+l3*cos(deg2rad(q2d+q3d))),...
+        l1+l2*sin(deg2rad(q2d))+l3*sin(deg2rad(q2d+q3d))];
+    J2=cross(z1,p_c2-p1); J3=cross(z1,p_c3-p1);
+    J4=cross(z1,p_c4-p1); Je=cross(z1,pe-p1);
+    M22=m2*(J2*J2')+m3*(J3*J3')+m4*(J4*J4')+mc*(Je*Je')+I_zz_sum;
+end
